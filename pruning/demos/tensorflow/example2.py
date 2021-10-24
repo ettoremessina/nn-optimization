@@ -1,5 +1,4 @@
 import numpy as np
-from sklearn.model_selection import train_test_split
 
 import tensorflow as tf
 from tensorflow import keras
@@ -12,58 +11,88 @@ from tensorflow_model_optimization.sparsity.keras import PolynomialDecay
 from support.trim_insignificant_weights import *
 from support.scatter_graph import *
 
-def build_mlp_regression_model():
-    inputs = keras.Input(shape=(1,))
+import pandas as pd
+
+def build_samples(seq, sample_length):
+    df = pd.DataFrame(seq)
+    cols = list()
+    for i in range(sample_length, 0, -1):
+        cols.append(df.shift(i))
+
+    for i in range(0, 1):
+        cols.append(df.shift(-i))
+
+    aggregate = pd.concat(cols, axis=1)
+    aggregate.dropna(inplace=True)
+
+    X_train, y_train = aggregate.values[:, :-1], aggregate.values[:, -1]
+
+    return X_train, y_train
+
+def compute_forecast(model):
+    y_forecast = np.array([])
+    to_predict_flat = np.array(y_train_timeseries[-sample_length:])
+    for i in range(forecast_length):
+        to_predict = to_predict_flat.reshape((1, sample_length, 1))
+        prediction = model.predict(to_predict, verbose=0)[0]
+        y_forecast = np.append(y_forecast, prediction)
+        to_predict_flat = np.delete(to_predict_flat, 0)
+        to_predict_flat = np.append(to_predict_flat, prediction)
+    return y_forecast
+
+def build_lstm_model(sample_length):
+    inputs = keras.Input(shape=(sample_length, 1))
     hidden = inputs
-    hidden = layers.Dense(32, use_bias=True, activation='relu')(hidden)
-    hidden = layers.Dense(64, use_bias=True, activation='relu')(hidden)
-    hidden = layers.Dense(32, use_bias=True, activation='relu')(hidden)
+    hidden = layers.LSTM(80, use_bias=True, activation='tanh')(hidden)
     outputs = layers.Dense(1, use_bias=True)(hidden)
-    model = keras.Model(inputs=inputs, outputs=outputs, name="mlp_regression_model")
+    model = keras.Model(inputs=inputs, outputs=outputs, name="long_short_term_memory_model")
     return model
 
-fx_gen_ds = lambda x: x**2 #generating function of the dataset
-x_dataset = np.arange(-2., 2, 0.005)
-y_dataset = fx_gen_ds(x_dataset)
+ft_gen_ts = lambda t: 2.0 * np.sin(t/10.0) #generating function of the time series
+t_train = np.arange(0, 200, 0.5, dtype=float)
+y_train_timeseries = ft_gen_ts(t_train)
+t_test = np.arange(200, 400, 0.5, dtype=float)
+y_test_timeseries = ft_gen_ts(t_test)
+sample_length = 6
+forecast_length = 400
+X_train, y_train = build_samples(y_train_timeseries, sample_length)
 
-x_train, x_test, y_train, y_test = train_test_split(x_dataset, y_dataset, test_size=0.2, random_state=1)
-x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.25, random_state=1)
-
-model_org = build_mlp_regression_model()
+model_org = build_lstm_model(sample_length)
 model_org.summary()
 
-batch_size=80
-epochs=100
+batch_size = 50
+epochs = 80
 loss=losses.MeanSquaredError(reduction='auto', name='mean_squared_error')
-optimizer = optimizers.Adam()
+optimizer=optimizers.Adam()
 
 model_org.compile(loss=loss, optimizer=optimizer)
 
 model_org.fit(
-    x_train, y_train,
+    X_train, y_train,
     batch_size=batch_size,
     epochs=epochs,
-    validation_data=(x_val, y_val),
     verbose=0)
 
-y_pred_org = model_org.predict(x_test)[:, 0]
-error_org = loss(y_test, y_pred_org).numpy()
+y_forecast_org = compute_forecast(model_org)
+error_org = loss(y_test_timeseries, y_forecast_org).numpy()
 
 num_of_w_org, num_of_nz_w_org, num_of_z_w_org = \
     inspect_weigths('original (unpruned)', model_org)
-unzipped_size_org, zipped_size_org = retrieve_size_of_model(model_org)
+unzippedh5_size_org, zippedh5_size_org = retrieve_size_of_model(model_org)
+unzippedlt_size_org, zippedlt_size_org = retrieve_size_of_lite_model(model_org)
 
 attempt_infos = []
 
 ai_org = AttemptInfo (
     'original (unpruned)',
     num_of_w_org, num_of_nz_w_org, num_of_z_w_org,
-    unzipped_size_org, zipped_size_org,
-    y_pred_org, error_org)
+    unzippedh5_size_org, zippedh5_size_org,
+    unzippedlt_size_org, zippedlt_size_org,
+    y_forecast_org, error_org)
 ai_org.print()
 attempt_infos.append(ai_org)
 
-end_step = np.ceil(len(x_train) / batch_size).astype(np.int32) * epochs
+end_step = np.ceil(len(X_train) / batch_size).astype(np.int32) * epochs
 
 attempt_configs = [
     AttemptConfig('poly decay 10/50', PolynomialDecay(
@@ -117,28 +146,29 @@ for ac in attempt_configs:
     model_pruning = build_pruning_model(model_org, ac.pruning_schedule)
     model_pruning.compile(loss=loss, optimizer=optimizer)
     callbacks_pruning = retrieve_callbacks_for_pruning()
-    model_pruning.fit(x_train, y_train,
+    model_pruning.fit(X_train, y_train,
         batch_size=batch_size,
         epochs=epochs,
-        validation_data=(x_val, y_val),
         callbacks=callbacks_pruning,
         verbose=0)
     model_pruned = extract_pruned_model(model_pruning)
     num_of_w_pruned, num_of_nz_w_pruned, num_of_z_w_pruned = \
         inspect_weigths(ac.name, model_pruned)
-    y_pred_pruned = model_pruned.predict(x_test)[:, 0]
-    error_pruned = loss(y_test, y_pred_pruned).numpy()
-    unzipped_size_pruned, zipped_size_pruned = retrieve_size_of_model(model_pruned)
+    y_forecast_pruned = compute_forecast(model_pruned)
+    error_pruned = loss(y_test_timeseries, y_forecast_pruned).numpy()
+    unzippedh5_size_pruned, zippedh5_size_pruned = retrieve_size_of_model(model_pruned)
+    unzippedlt_size_pruned, zippedlt_size_pruned = retrieve_size_of_lite_model(model_pruned)
 
     mi_pruned = AttemptInfo (
         ac.name,
         num_of_w_pruned, num_of_nz_w_pruned, num_of_z_w_pruned,
-        unzipped_size_pruned, zipped_size_pruned,
-        y_pred_pruned, error_pruned)
+        unzippedh5_size_pruned, zippedh5_size_pruned,
+        unzippedlt_size_pruned, zippedlt_size_pruned,
+        y_forecast_pruned, error_pruned)
     mi_pruned.print()
     attempt_infos.append(mi_pruned)
 
 print('')
 print('*** Final recap ***')
 print_attempt_infos(attempt_infos)
-scatter_attempt_infos(attempt_infos, x_test, y_test)
+scatter_attempt_infos(attempt_infos, t_test, y_test_timeseries)
