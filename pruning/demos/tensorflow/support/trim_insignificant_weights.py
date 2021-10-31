@@ -8,6 +8,11 @@ import os
 import tempfile
 import zipfile
 
+class AttemptConfig:
+    def __init__(self, name, pruning_schedule):
+        self.name = name
+        self.pruning_schedule = pruning_schedule
+
 class AttemptInfo:
     def __init__(self,
         name,
@@ -45,10 +50,10 @@ class AttemptInfo:
         print('  Zipped tflite size: %i bytes (compression factor: %.2f%%)' % (self.zippedlt_size, self.compressionlt_factor))
         print('  Error (loss) value: %E' % self.error_value)
 
-class AttemptConfig:
-    def __init__(self, name, pruning_schedule):
-        self.name = name
-        self.pruning_schedule = pruning_schedule
+def print_attempt_infos(attempt_infos):
+    print('%-20s %12s %9s %16s'% ('Attempt name', 'Size h5', '(Comp. %)', 'Error (loss)'))
+    for ai in attempt_infos:
+        print('%-20s %12i (%6.2f%%) %16e'% (ai.name, ai.zippedh5_size, ai.compressionh5_factor, ai.error_value))
 
 def inspect_weigths(name, model, verbose=False):
     nlayer=0
@@ -121,8 +126,3 @@ def retrieve_callbacks_for_pruning():
 
 def extract_pruned_model(model_pruning):
     return tfmot.sparsity.keras.strip_pruning(model_pruning)
-
-def print_attempt_infos(attempt_infos):
-    print('%-20s %12s %9s %16s'% ('Attempt name', 'Size h5', '(Comp. %)', 'Error (loss)'))
-    for ai in attempt_infos:
-        print('%-20s %12i (%6.2f%%) %16e'% (ai.name, ai.zippedh5_size, ai.compressionh5_factor, ai.error_value))

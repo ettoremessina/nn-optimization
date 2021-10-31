@@ -1,0 +1,7 @@
+numpy
+matplotlib
+sklearn
+pandas
+tensorflow_model_optimization
+tensorflow_datasets
+
